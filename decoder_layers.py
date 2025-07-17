@@ -80,7 +80,8 @@ class GemmaRotaryEmbedding(nn.Module):
         # position_ids_expanded: [Batch_Size, 1, Seq_Len]
         position_ids_expanded = position_ids[:, None, :].float()
         device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        # device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        device_type = "cuda"
         with torch.autocast(device_type=device_type, enabled=False):
             # Multiply each theta by the position (which is the argument of the sin and cos functions)
             # freqs: [Batch_Size, Head_Dim // 2, 1] @ [Batch_Size, 1, Seq_Len] --> [Batch_Size, Seq_Len, Head_Dim // 2]
@@ -118,6 +119,7 @@ class GemmaMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         # Equivalent to:
@@ -126,7 +128,7 @@ class GemmaMLP(nn.Module):
         # j = self.up_proj(x) # [Batch_Size, Seq_Len, Hidden_Size] -> [Batch_Size, Seq_Len, Intermediate_Size]
         # z = y * j # [Batch_Size, Seq_Len, Intermediate_Size]
         # z = self.down_proj(z) # [Batch_Size, Seq_Len, Intermediate_Size] -> [Batch_Size, Seq_Len, Hidden_Size]
-        return self.down_proj(nn.functional.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x))
+        return self.dropout(self.down_proj(nn.functional.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x)))
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
@@ -364,10 +366,11 @@ class PaliGemmaMultiModalProjector(nn.Module):
     def __init__(self, config: PaliGemmaConfig):
         super().__init__()
         self.linear = nn.Linear(config.hidden_size, config.projection_dim, bias=True)
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, image_features):
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Projection_Dim]
-        hidden_states = self.linear(image_features)
+        hidden_states = self.dropout(self.linear(image_features))
         return hidden_states
 
 class PaliGemmaForConditionalGeneration(nn.Module):
@@ -390,10 +393,12 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         self, input_ids: torch.Tensor, image_features: torch.Tensor, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor, kv_cache: Optional[KVCache] = None
     ):
         _, _, embed_dim = image_features.shape
+        # _, embed_dim = image_features.shape # Shape: [Batch_Size, Hidden_Size] 
         batch_size, sequence_length = input_ids.shape
         dtype, device = inputs_embeds.dtype, inputs_embeds.device
         # Shape: [Batch_Size, Seq_Len, Hidden_Size]
-        scaled_image_features = image_features / (self.config.hidden_size**0.5)
+        # scaled_image_features = image_features / (self.config.hidden_size**0.5)
+        scaled_image_features = image_features
     
         # Combine the embeddings of the image tokens, the text tokens and mask out all the padding tokens.
         final_embedding = torch.zeros(batch_size, sequence_length, embed_dim, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
@@ -412,6 +417,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         # Add the text embeddings
         final_embedding = torch.where(text_mask_expanded, inputs_embeds, final_embedding)
         # Insert image embeddings. We can't use torch.where because the sequence length of scaled_image_features is not equal to the sequence length of the final embedding
+        scaled_image_features = scaled_image_features.to(final_embedding.dtype)
         final_embedding = final_embedding.masked_scatter(image_mask_expanded, scaled_image_features)
         # Zero out padding tokens
         final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
@@ -481,7 +487,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         image_features = torch.cat([vision_features[:, 0], vision_features[:, 1]], dim=1)
 
         # Project to language model input space
-        inputs_embeds = self.multi_modal_projector(image_features)  # [B, Seq, Hidden]
+        images_features = self.multi_modal_projector(image_features)  # [B, Seq, Hidden]
 
         # Merge the embeddings of the text tokens and the image tokens
         inputs_embeds, attention_mask, position_ids = self._merge_input_ids_with_image_features(input_ids, image_features, inputs_embeds, attention_mask, kv_cache)
@@ -494,81 +500,3 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         )
 
         return outputs
-    
-    def beam_search(self, pixel_values, beam_size=5, max_seq_len=100, device=None):
-        model = self.language_model
-        pixel_values = pixel_values.to(device)  # [B, 2, 3, H, W]
-
-        batch_size = pixel_values.size(0)
-        sos_token_id = 1
-        eos_token_id = 2
-        pad_token_id = 0
-
-        # Initialize sequences with <BOS>
-        sequences = torch.full(
-            (batch_size, beam_size, 1), sos_token_id, dtype=torch.long, device=device
-        )  # [B, beam, T=1]
-        sequence_scores = torch.zeros(batch_size, beam_size, device=device)
-
-        image_features = self.vision_tower(pixel_values)  # [B, N, C]
-        B = 1
-        N, C, H, W = pixel_values.shape  # N=2 images per sample
-        pixel_values = pixel_values.view(B * N, C, H, W)
-
-        # Encode both images → get features
-        vision_features = self.vision_tower(pixel_values)  # [B * 2, Patches, Dim]
-        vision_features = vision_features.view(B, N, *vision_features.shape[1:])  # [B, 2, Patches, Dim]
-
-        # Fuse image features
-        image_features = torch.cat([vision_features[:, 0], vision_features[:, 1]], dim=1)
-        inputs_embeds = self.multi_modal_projector(image_features)  # [B, Seq, Hidden]
-
-        for step in range(max_seq_len):
-            flat_sequences = sequences.view(batch_size * beam_size, -1)  # [B*beam, T]
-            attention_mask = (flat_sequences != pad_token_id).long()
-
-            # Forward pass
-            inputs_embeds, attention_mask, position_ids = self._merge_input_ids_with_image_features(flat_sequences, image_features, inputs_embeds, attention_mask)
-        
-            outputs = self.language_model(
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                inputs_embeds=inputs_embeds,
-            )
-
-            logits = outputs["logits"]  # [B*beam, T, V]
-            next_token_logits = logits[:, -1, :]  # [B*beam, V]
-            log_probs = F.log_softmax(next_token_logits, dim=-1)
-
-            # Reshape for beam search
-            log_probs = log_probs.view(batch_size, beam_size, -1)  # [B, beam, V]
-            scores = sequence_scores.unsqueeze(-1) + log_probs  # [B, beam, V]
-            scores = scores.view(batch_size, -1)  # [B, beam*V]
-
-            top_scores, top_indices = torch.topk(scores, beam_size, dim=-1)  # [B, beam]
-            sequence_scores = top_scores
-            next_tokens = top_indices % model.vocab_size
-            beam_indices = top_indices // model.vocab_size
-
-            # Gather beams and append new tokens
-            sequences = sequences.gather(
-                1,
-                beam_indices.unsqueeze(-1).expand(-1, -1, sequences.size(-1))
-            )
-            sequences = torch.cat([sequences, next_tokens.unsqueeze(-1)], dim=-1)  # [B, beam, T+1]
-
-            # Early stopping if all beams end with EOS
-            if (next_tokens == eos_token_id).all():
-                break
-
-        # Pad if needed
-        if sequences.shape[-1] < max_seq_len:
-            pad_len = max_seq_len - sequences.shape[-1]
-            pad = torch.full((batch_size, beam_size, pad_len), pad_token_id, device=device, dtype=torch.long)
-            sequences = torch.cat([sequences, pad], dim=-1)
-
-        # Select best beam
-        best_indices = sequence_scores.argmax(dim=-1)
-        final_sequences = sequences[torch.arange(batch_size), best_indices]  # [B, T]
-
-        return final_sequences

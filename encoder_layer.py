@@ -23,6 +23,7 @@ class CLIPWithLoRA(nn.Module):
 
         # Load CLIP model and preprocess
         self.clip_model, self.preprocess = clip.load(config.clip_model_name, device=self.device)
+        self.clip_model.float()
 
         # Inject LoRA into target modules
         lora_config = LoraConfig(
@@ -36,11 +37,16 @@ class CLIPWithLoRA(nn.Module):
 
         use_lora = config.enable_lora
         if use_lora == True:
+            for param in self.clip_model.parameters():
+                param.requires_grad = False
             self.clip_model = get_peft_model(self.clip_model, lora_config).to(self.device)
         else:
             pass
 
     def get_patch_tokens(self, clip_model, pixel_values):
+        conv_dtype = clip_model.conv1.weight.dtype
+        conv_device = clip_model.conv1.weight.device
+        pixel_values = pixel_values.to(dtype=conv_dtype, device=conv_device)
         x = clip_model.conv1(pixel_values)
         x = x.reshape(x.shape[0], x.shape[1], -1)
         x = x.permute(0, 2, 1)
@@ -60,11 +66,16 @@ class CLIPWithLoRA(nn.Module):
 
         return x
 
+    @torch.no_grad()
     def forward(self, images):
         # images: [B, 3, H, W]
-        image_features = self.get_patch_tokens(self.clip_model.visual, images)
-        # last_hidden_state = image_features["last_hidden_state"]  # [B, Num_Patches, Embed_Dim]
-        return image_features
+        vision_model = self.clip_model.visual
+        dtype = next(vision_model.parameters()).dtype
+        device = next(vision_model.parameters()).device
+    
+        images = images.to(device=device, dtype=dtype)
+        # return vision_model(images)
+        return self.get_patch_tokens(vision_model, images)
 
     def get_preprocess(self):
         return self.preprocess

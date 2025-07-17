@@ -9,7 +9,7 @@ from encoder_layer import CLIPWithLoRA
 from configs.config import DataConfig, EncoderConfig
 
 class BaseDataset(Dataset):
-    def __init__(self, tokenizer, split, config = DataConfig(), preprocess=None):
+    def __init__(self, tokenizer, split, config=DataConfig(), preprocess=None):
         self.image_dir = config.image_dir
         self.annotation_path = config.annotation_path
         self.max_seq_length = config.max_seq_length
@@ -17,11 +17,26 @@ class BaseDataset(Dataset):
         self.tokenizer = tokenizer
         self.preprocess = preprocess
         self.annotation = json.loads(open(self.annotation_path, 'r').read())
-
         self.examples = self.annotation[self.split]
+
+        image_size = 224
+        patch_size = 16
+        num_images = 2
+
+        self.num_image_tokens = 100
+
+        image_token_id = tokenizer.get_id_by_token('<image>')
+
         for i in range(len(self.examples)):
-            self.examples[i]['ids'] = tokenizer(self.examples[i]['report'])[:self.max_seq_length]
-            self.examples[i]['mask'] = [1] * len(self.examples[i]['ids'])
+            report_ids = tokenizer(self.examples[i]['report'])
+
+            max_text_len = 100
+            report_ids = report_ids[:max_text_len]
+
+            ids = [image_token_id] * self.num_image_tokens + report_ids
+
+            self.examples[i]['ids'] = ids
+            self.examples[i]['mask'] = [0] * self.num_image_tokens + [1] * len(report_ids)
 
     def __len__(self):
         return len(self.examples)
@@ -66,17 +81,20 @@ class CustomDataLoader(DataLoader):
         )
 
     @staticmethod
-    def collate_fn(data, pad_token_id=0, max_seq_len=100):
+    def collate_fn(data, pad_token_id=0, max_text_len=100, num_image_tokens=100):
         input_ids, images_features, reports_ids, reports_masks, seq_lengths = zip(*data)
         images_features = torch.stack(images_features, 0)
-
-        # Fixed padding length (e.g., max_seq_len), not dynamic from longest in batch
-        targets = torch.full((len(reports_ids), max_seq_len), pad_token_id, dtype=torch.long)
-        targets_masks = torch.zeros((len(reports_ids), max_seq_len), dtype=torch.float)
-
+    
+        total_len = num_image_tokens + max_text_len
+    
+        targets = torch.full((len(reports_ids), total_len), pad_token_id, dtype=torch.long)
+        targets_masks = torch.zeros((len(reports_ids), total_len), dtype=torch.float)
+    
         for i, (report_ids, report_masks) in enumerate(zip(reports_ids, reports_masks)):
-            length = min(len(report_ids), max_seq_len)
-            targets[i, :length] = torch.tensor(report_ids[:length], dtype=torch.long)
-            targets_masks[i, :length] = torch.tensor(report_masks[:length], dtype=torch.float)
-
+            ids = report_ids[:total_len]
+            masks = report_masks[:total_len]
+    
+            targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+            targets_masks[i, :len(masks)] = torch.tensor(masks, dtype=torch.float)
+    
         return targets, images_features, targets_masks

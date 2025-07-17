@@ -29,7 +29,7 @@ class Tokenizer(object):
         vocab.sort()
 
         # Add special tokens at the beginning
-        vocab = ['<pad>', '<bos>', '<eos>', '<unk>'] + vocab
+        vocab = ['<pad>', '<bos>', '<eos>', '<unk>'] + vocab + ['<image>']
         token2idx = {token: idx for idx, token in enumerate(vocab)}
         idx2token = {idx: token for token, idx in token2idx.items()}
 

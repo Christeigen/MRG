@@ -4,8 +4,8 @@ class DataConfig():
     def __init__(
         self,
         annotation_path = "data/annotation.json",
-        threshold = 2,
-        max_seq_length = 100,
+        threshold = 3,
+        max_seq_length = 200,
         dataset_name = "updated_iu_xray",
         image_dir = "data/updated_iu_xray"
     ):
@@ -20,7 +20,7 @@ class EncoderConfig():
 
     def __init__(
         self,
-        rank=8,
+        rank=16,
         lora_alpha=16,
         lora_dropout=0.1,
         enable_lora=True,
@@ -43,18 +43,20 @@ class DecoderConfig():
 
     def __init__(
         self,
-        vocab_size=979,
+        vocab_size=764,
+        # vocab_size=28997,
         hidden_size=768,
         intermediate_size=2048,
-        num_hidden_layers=12,
+        num_hidden_layers=9,
         num_attention_heads=8,
         num_key_value_heads=1,
         head_dim=256,
-        max_position_embeddings=2048,
+        max_position_embeddings=100,
         rms_norm_eps=1e-6,
         rope_theta=10000.0,
         attention_bias=False,
-        attention_dropout=0.0,
+        dropout=0.1,
+        attention_dropout=0.1,
         pad_token_id=None,
         **kwargs,
     ):
@@ -79,8 +81,10 @@ class PaliGemmaConfig():
         self,
         text_config=None,
         ignore_index=-100,
-        image_token_index=978,
-        vocab_size=979,
+        image_token_index=763,
+        vocab_size=764,
+        # image_token_index=28996,
+        # vocab_size=28997,
         projection_dim=768,
         hidden_size=768,
         pad_token_id=0,
