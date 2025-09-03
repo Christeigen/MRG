@@ -1,10 +1,13 @@
 venv
 *.tar
 *.pkl
+*.json
 data/iu_xray
+data/updated_iu_xray
 __pycache__
 test_lora.ipynb
 test_decoder.ipynb
 exploration.ipynb
 checkpoints
+cached_embeds
 plot
