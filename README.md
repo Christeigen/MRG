@@ -16,7 +16,7 @@
 
 # Proposed Architecture
 <p align="center">
-  <img src="assets/mrg_architecture.jpg" alt="Model Architecture" />
+  <img src="assets\mrg_architecture .jpg" alt="Model Architecture" />
 </p>
 
 # Inconsistency Handling
